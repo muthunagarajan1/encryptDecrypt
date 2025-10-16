@@ -1,0 +1,13 @@
+# Ignore everything
+*
+
+# But allow these specific files
+!decrypt.md
+!decrypt.sh
+!encrypt.md
+!encrypt.sh
+!LICENSE
+!README.md
+!shred.md
+!shred.sh
+!.gitignore
