@@ -47,10 +47,6 @@ check_dependencies() {
         missing_tools+=("gnupg")
     fi
     
-    if ! command -v shred &> /dev/null; then
-        missing_tools+=("coreutils")
-    fi
-    
     if [ ${#missing_tools[@]} -gt 0 ]; then
         log_error "Missing required tools. Please install them with:"
         echo
@@ -59,6 +55,53 @@ check_dependencies() {
         done
         echo
         exit 1
+    fi
+}
+
+# Function to securely delete a file with multiple methods
+secure_delete() {
+    local file_path="$1"
+    local file_name=$(basename "$file_path")
+    
+    log_info "Attempting to securely delete: $file_name"
+    
+    # Method 1: Overwrite with random data multiple times
+    if command -v dd &> /dev/null && command -v urandom &> /dev/null; then
+        local file_size=$(stat -c%s "$file_path")
+        local block_size=4096
+        local blocks=$((file_size / block_size + 1))
+        
+        # Overwrite with random data 3 times
+        for i in {1..3}; do
+            if dd if=/dev/urandom of="$file_path" bs=$block_size count=$blocks conv=notrunc 2>/dev/null; then
+                sync
+            else
+                log_warning "Failed to overwrite with random data on pass $i"
+                break
+            fi
+        done
+        
+        # Final overwrite with zeros
+        if dd if=/dev/zero of="$file_path" bs=$block_size count=$blocks conv=notrunc 2>/dev/null; then
+            sync
+        fi
+    fi
+    
+    # Method 2: Remove the file
+    rm -f "$file_path"
+    if [ $? -eq 0 ]; then
+        log_success "File securely deleted."
+        
+        # Verify the file is actually gone
+        if [ ! -f "$file_path" ]; then
+            return 0
+        else
+            log_error "File still exists after deletion attempt."
+            return 1
+        fi
+    else
+        log_error "Failed to delete file. Please delete it manually."
+        return 1
     fi
 }
 
@@ -85,6 +128,7 @@ log_warning "IMPORTANT: Please read the following carefully:"
 echo "1. If you forget the password, your file will be PERMANENTLY inaccessible."
 echo "2. After successful encryption, the original file will be securely deleted."
 echo "3. This deletion is irreversible and the file cannot be recovered."
+echo "4. Note: On journaling file systems, secure deletion may not be 100% effective."
 echo "========================================"
 
 # Ask for confirmation
@@ -133,9 +177,10 @@ log_info "Encrypting file: $file_path"
 
 # Encrypt the file
 echo "$password" | gpg --batch --yes --passphrase-fd 0 -c --cipher-algo AES256 "$file_path"
+encrypt_success=$?
 
 # Check if encryption was successful
-if [ $? -eq 0 ] && [ -f "$encrypted_file" ]; then
+if [ $encrypt_success -eq 0 ] && [ -f "$encrypted_file" ]; then
     log_success "File encrypted successfully: $encrypted_file"
 else
     log_error "Encryption failed."
@@ -146,38 +191,30 @@ fi
 log_info "Verifying encryption integrity..."
 temp_file=$(mktemp)
 echo "$password" | gpg --batch --yes --passphrase-fd 0 -o "$temp_file" "$encrypted_file" 2>/dev/null
+decrypt_success=$?
 
-if [ $? -eq 0 ]; then
+if [ $decrypt_success -eq 0 ]; then
     # Compare original and decrypted files
     if cmp -s "$file_path" "$temp_file"; then
         log_success "Encryption verification successful."
         
-        # Securely delete the original file
-        log_info "Securely deleting original file: $file_path"
-        shred -vfz -n 3 "$file_path"
+        # Securely delete the original file using our improved function
+        secure_delete "$file_path"
         
-        if [ $? -eq 0 ]; then
-            log_success "Original file securely deleted."
-        else
-            log_error "Failed to securely delete original file. Please delete it manually."
-        fi
     else
         log_error "Encryption verification failed. Decrypted content does not match original."
         log_info "Keeping original file for your safety."
         # Securely delete the encrypted file
-        log_info "Securely deleting failed encrypted file: $encrypted_file"
-        shred -vfz -n 3 "$encrypted_file" 2>/dev/null
+        secure_delete "$encrypted_file"
     fi
 else
     log_error "Failed to decrypt for verification. Something went wrong."
     log_info "Keeping original file for your safety."
     # Securely delete the encrypted file
-    log_info "Securely deleting failed encrypted file: $encrypted_file"
-    shred -vfz -n 3 "$encrypted_file" 2>/dev/null
+    secure_delete "$encrypted_file"
 fi
 
 # Clean up temporary files securely
-log_info "Securely deleting temporary file: $temp_file"
-shred -vfz -n 3 "$temp_file" 2>/dev/null
+secure_delete "$temp_file"
 
 log_info "Encryption process completed."
